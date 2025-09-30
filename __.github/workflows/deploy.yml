@@ -1,0 +1,261 @@
+name: Deploy (Cloud Run) - Flexible
+
+on:
+  # Déploiement auto sur main et tags
+  push:
+    branches: ["main"]
+    tags: ["v*.*.*"]
+  # Déclenchement manuel avec options
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environnement de déploiement"
+        type: choice
+        required: true
+        default: "staging"
+        options: ["dev", "staging", "prod"]
+      project_id:
+        description: "GCP Project ID (override)"
+        required: false
+        type: string
+      region:
+        description: "GCP Region"
+        required: true
+        default: "europe-west1"
+        type: choice
+        options: ["europe-west1", "europe-west9", "us-central1", "asia-south1"]
+      service_name:
+        description: "Cloud Run service name (override)"
+        required: false
+        type: string
+      image_repo:
+        description: "Image repo (gcr.io/<project>/<name> ou <region>-docker.pkg.dev/<project>/<repo>/<name>)"
+        required: false
+        type: string
+      allow_unauthenticated:
+        description: "Autoriser l'accès public"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      cpu:
+        description: "CPU (ex: 1, 2)"
+        required: true
+        default: "1"
+        type: string
+      memory:
+        description: "Mémoire (ex: 1Gi, 2Gi)"
+        required: true
+        default: "1Gi"
+        type: string
+      min_instances:
+        description: "Min instances"
+        required: true
+        default: "0"
+        type: string
+      max_instances:
+        description: "Max instances"
+        required: true
+        default: "3"
+        type: string
+      concurrency:
+        description: "Concurrency (requests/instance)"
+        required: true
+        default: "80"
+        type: string
+      traffic_percent:
+        description: "Pourcentage de trafic vers la nouvelle révision (0-100)"
+        required: true
+        default: "100"
+        type: string
+      revision_suffix:
+        description: "Suffixe de révision (optionnel)"
+        required: false
+        type: string
+      deploy_tagged_only:
+        description: "Ne déployer que sur tags (ignore push main)"
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      rollback_to:
+        description: "Révision à restaurer (laisser vide pour ignorer)"
+        required: false
+        type: string
+
+env:
+  DEFAULT_PROJECT_ID: bq-small-corp
+  DEFAULT_REGION: europe-west1
+  DEFAULT_SERVICE_NAME: ai-agent-review
+  DEFAULT_IMAGE: gcr.io/bq-small-corp/ai-agent-review
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Decide effective inputs
+        id: decide
+        run: |
+          # Determine environment from event
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ github.event.inputs.environment }}"
+            REGION="${{ github.event.inputs.region }}"
+            PROJECT_ID="${{ github.event.inputs.project_id || env.DEFAULT_PROJECT_ID }}"
+            SERVICE_NAME="${{ github.event.inputs.service_name || env.DEFAULT_SERVICE_NAME }}"
+            IMAGE="${{ github.event.inputs.image_repo || env.DEFAULT_IMAGE }}"
+            ALLOW="${{ github.event.inputs.allow_unauthenticated }}"
+            CPU="${{ github.event.inputs.cpu }}"
+            MEM="${{ github.event.inputs.memory }}"
+            MIN="${{ github.event.inputs.min_instances }}"
+            MAX="${{ github.event.inputs.max_instances }}"
+            CONC="${{ github.event.inputs.concurrency }}"
+            TRAF="${{ github.event.inputs.traffic_percent }}"
+            SUFFIX="${{ github.event.inputs.revision_suffix }}"
+            TAGS_ONLY="${{ github.event.inputs.deploy_tagged_only }}"
+            ROLLBACK_TO="${{ github.event.inputs.rollback_to }}"
+          else
+            # Automatic push: default to staging unless tag
+            if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+              ENV="prod"
+            else
+              ENV="staging"
+            fi
+            REGION="${{ env.DEFAULT_REGION }}"
+            PROJECT_ID="${{ env.DEFAULT_PROJECT_ID }}"
+            SERVICE_NAME="${{ env.DEFAULT_SERVICE_NAME }}"
+            IMAGE="${{ env.DEFAULT_IMAGE }}"
+            ALLOW="true"
+            CPU="1"
+            MEM="1Gi"
+            MIN="0"
+            MAX="3"
+            CONC="80"
+            TRAF="100"
+            SUFFIX=""
+            TAGS_ONLY="false"
+            ROLLBACK_TO=""
+          fi
+
+          # Optionnel: préfixer le service par env
+          if [ "$ENV" != "prod" ]; then
+            SERVICE_NAME="${SERVICE_NAME}-${ENV}"
+          fi
+
+          echo "env=$ENV" >> $GITHUB_OUTPUT
+          echo "region=$REGION" >> $GITHUB_OUTPUT
+          echo "project_id=$PROJECT_ID" >> $GITHUB_OUTPUT
+          echo "service_name=$SERVICE_NAME" >> $GITHUB_OUTPUT
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "allow=$ALLOW" >> $GITHUB_OUTPUT
+          echo "cpu=$CPU" >> $GITHUB_OUTPUT
+          echo "mem=$MEM" >> $GITHUB_OUTPUT
+          echo "min=$MIN" >> $GITHUB_OUTPUT
+          echo "max=$MAX" >> $GITHUB_OUTPUT
+          echo "conc=$CONC" >> $GITHUB_OUTPUT
+          echo "traf=$TRAF" >> $GITHUB_OUTPUT
+          echo "suffix=$SUFFIX" >> $GITHUB_OUTPUT
+          echo "tags_only=$TAGS_ONLY" >> $GITHUB_OUTPUT
+          echo "rollback_to=$ROLLBACK_TO" >> $GITHUB_OUTPUT
+
+      - name: Stop if deploy_tagged_only and not a tag
+        if: steps.decide.outputs.tags_only == 'true' && startsWith(github.ref, 'refs/tags/') == false
+        run: |
+          echo "deploy_tagged_only=true et ce push n'est pas un tag. Fin."
+          exit 0
+
+      - name: Auth to Google Cloud (prefer WIF if set, else SA JSON)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          credentials_json: ${{ secrets.GCP_SA_KEY_JSON }}
+          token_format: access_token
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ steps.decide.outputs.project_id }}
+
+      - name: Configure Docker auth (GCR + Artifact Registry)
+        run: |
+          # Toujours activer gcr.io
+          gcloud auth configure-docker gcr.io --quiet
+          # Si l'image cible est Artifact Registry (ex: europe-west1-docker.pkg.dev/...)
+          if echo "${{ steps.decide.outputs.image }}" | grep -Eo '^[a-z0-9-]+-docker\.pkg\.dev' >/dev/null 2>&1; then
+            REG=$(echo "${{ steps.decide.outputs.image }}" | sed -E 's@^([a-z0-9-]+)-docker\.pkg\.dev/.*@\1@')
+            gcloud auth configure-docker "$REG-docker.pkg.dev" --quiet
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push image (with cache)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.decide.outputs.image }}:${{ github.sha }}
+            ${{ steps.decide.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+
+      - name: Optional rollback
+        if: steps.decide.outputs.rollback_to != ''
+        run: |
+          gcloud run services update-traffic ${{ steps.decide.outputs.service_name }} \
+            --region ${{ steps.decide.outputs.region }} \
+            --to-revisions ${{ steps.decide.outputs.rollback_to }}=${{ steps.decide.outputs.traf }}
+
+      - name: Deploy to Cloud Run
+        if: steps.decide.outputs.rollback_to == ''
+        run: |
+          FLAGS=(
+            --image ${{ steps.decide.outputs.image }}:latest
+            --region ${{ steps.decide.outputs.region }}
+            --platform managed
+            --port 8501
+            --cpu ${{ steps.decide.outputs.cpu }}
+            --memory ${{ steps.decide.outputs.mem }}
+            --min-instances ${{ steps.decide.outputs.min }}
+            --max-instances ${{ steps.decide.outputs.max }}
+            --concurrency ${{ steps.decide.outputs.conc }}
+            --set-env-vars "STREAMLIT_SERVER_ADDRESS=0.0.0.0"
+          )
+          if [ "${{ steps.decide.outputs.allow }}" = "true" ]; then
+            FLAGS+=(--allow-unauthenticated)
+          fi
+          if [ -n "${{ steps.decide.outputs.suffix }}" ]; then
+            FLAGS+=(--revision-suffix=${{ steps.decide.outputs.suffix }})
+          fi
+
+          gcloud run deploy ${{ steps.decide.outputs.service_name }} "${FLAGS[@]}"
+
+          if [ "${{ steps.decide.outputs.traf }}" != "100" ]; then
+            echo "⏩ Split du trafic ${ { steps.decide.outputs.traf } }% -> nouvelle révision"
+            gcloud run services update-traffic ${{ steps.decide.outputs.service_name }} \
+              --region ${{ steps.decide.outputs.region }} \
+              --to-latest \
+              --splits latest=${{ steps.decide.outputs.traf }}
+          fi
+
+      - name: Show service URL
+        run: |
+          URL=$(gcloud run services describe ${{ steps.decide.outputs.service_name }} --region ${{ steps.decide.outputs.region }} --format='value(status.url)')
+          echo "✅ Service URL: $URL"

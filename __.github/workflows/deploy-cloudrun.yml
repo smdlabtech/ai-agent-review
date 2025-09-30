@@ -1,0 +1,57 @@
+name: Deploy to Google Cloud Run
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  PROJECT_ID: bq-small-corp
+  REGION: europe-west1
+  SERVICE_NAME: ai-agent-review
+  IMAGE: gcr.io/bq-small-corp/ai-agent-review
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up gcloud auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY_JSON }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker --quiet
+
+      - name: Build image
+        run: |
+          docker build -t $IMAGE:$GITHUB_SHA -f docker/Dockerfile .
+          docker tag $IMAGE:$GITHUB_SHA $IMAGE:latest
+
+      - name: Push image
+        run: |
+          docker push $IMAGE:$GITHUB_SHA
+          docker push $IMAGE:latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy $SERVICE_NAME \
+            --image $IMAGE:latest \
+            --region $REGION \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8501 \
+            --memory 1Gi \
+            --max-instances 3

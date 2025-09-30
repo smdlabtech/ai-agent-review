@@ -90,10 +90,11 @@ graph TD
     E --> L[planner.py]
     F --> M[demo.gif]
 ```
-##🧪Exemples d’usage
 
-```
-from agent_builder import SmartAgent
+## 🧪 Exemples d’usage
+
+```python
+from src.agent_builder import SmartAgent
 
 agent = SmartAgent(
     tools=["search", "calendar"],
@@ -106,7 +107,8 @@ print(response)
 ```
 
 ## 📈 Roadmap 2025
-```copy
+
+```
 Liste de frameworks agents
 Protocoles de scaling
 Tutoriels interactifs
@@ -115,4 +117,36 @@ Guide éthique & conformité
 Benchmarks & tests unitaires
 ```
 
+---
+
+## 🚦 Lancer le chatbot localement (Streamlit)
+
+```bash
+uv venv .venv && source .venv/bin/activate  # ou python -m venv .venv
+pip install -r requirements.txt
+cp .env.example .env  # renseignez vos clés
+streamlit run app/streamlit_app.py
+```
+
+## 🐳 Docker (option Cloud Run-ready)
+
+```bash
+docker build -t smdlabtech/ai-agent-review:latest -f docker/Dockerfile .
+docker run -p 8501:8501 --env-file .env smdlabtech/ai-agent-review:latest
+```
+
+### 🔍 Environnements de **Preview** (PR)
+Un workflow dédié déploie une **préproduction éphémère** à chaque Pull Request :
+- Workflow: `.github/workflows/deploy-preview.yml`
+- Service: `ai-agent-review-preview-<ref>-<sha7>`
+- URL renvoyée dans le **Job Summary**
+
+Déclenchement manuel possible via **Run workflow** avec options (`region`, `image_repo`, `keep_instances_warm`).
+
+### 🧰 Artifact Registry vs GCR
+Tu peux pousser l'image vers :
+- **GCR**: `gcr.io/<project>/<image>` *(par défaut)*
+- **Artifact Registry**: `<region>-docker.pkg.dev/<project>/<repo>/<image>`
+
+Les workflows détectent automatiquement Artifact Registry et configurent `docker auth` pour le bon **host régional**.
 

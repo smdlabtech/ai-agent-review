@@ -1,0 +1,139 @@
+name: Deploy Preview (Cloud Run)
+
+on:
+  pull_request:
+    branches: ["*"]
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "GCP Region"
+        required: true
+        default: "europe-west1"
+        type: choice
+        options: ["europe-west1", "europe-west9", "us-central1", "asia-south1"]
+      project_id:
+        description: "GCP Project ID"
+        required: false
+        type: string
+      image_repo:
+        description: "Image repo (Artifact Registry ou GCR)"
+        required: false
+        type: string
+      keep_instances_warm:
+        description: "Min instances = 1 (démo plus rapide)"
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+env:
+  DEFAULT_PROJECT_ID: bq-small-corp
+  DEFAULT_IMAGE: gcr.io/bq-small-corp/ai-agent-review
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: preview-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute names
+        id: names
+        run: |
+          # PR number or branch
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            REF="pr-${{ github.event.number }}"
+          else
+            REF="${{ github.ref_name }}"
+          fi
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+
+          # Service de préview
+          SERVICE_NAME="ai-agent-review-preview-${REF//[^a-zA-Z0-9-]/-}-${SHORT_SHA}"
+          SERVICE_NAME=$(echo "$SERVICE_NAME" | tr '[:upper:]' '[:lower:]' | cut -c1-60)
+
+          REGION="${{ github.event.inputs.region || 'europe-west1' }}"
+          PROJECT_ID="${{ github.event.inputs.project_id || env.DEFAULT_PROJECT_ID }}"
+          IMAGE="${{ github.event.inputs.image_repo || env.DEFAULT_IMAGE }}"
+          KEEP="${{ github.event.inputs.keep_instances_warm || 'false' }}"
+
+          echo "service_name=$SERVICE_NAME" >> $GITHUB_OUTPUT
+          echo "region=$REGION" >> $GITHUB_OUTPUT
+          echo "project_id=$PROJECT_ID" >> $GITHUB_OUTPUT
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "keep=$KEEP" >> $GITHUB_OUTPUT
+
+      - name: Auth to Google Cloud (WIF preferred, fallback to SA JSON)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          credentials_json: ${{ secrets.GCP_SA_KEY_JSON }}
+          token_format: access_token
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ steps.names.outputs.project_id }}
+
+      - name: Configure Docker auth (GCR + Artifact Registry)
+        run: |
+          gcloud auth configure-docker gcr.io --quiet
+          if echo "${{ steps.names.outputs.image }}" | grep -Eo '^[a-z0-9-]+-docker\\.pkg\\.dev' >/dev/null 2>&1; then
+            REG=$(echo "${{ steps.names.outputs.image }}" | sed -E 's@^([a-z0-9-]+)-docker\\.pkg\\.dev/.*@\\1@')
+            gcloud auth configure-docker "$REG-docker.pkg.dev" --quiet
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push image (with cache)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.names.outputs.image }}:${{ github.sha }}
+            ${{ steps.names.outputs.image }}:preview-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy Preview to Cloud Run
+        id: deploy
+        run: |
+          MIN=0
+          if [ "${{ steps.names.outputs.keep }}" = "true" ]; then
+            MIN=1
+          fi
+          gcloud run deploy ${{ steps.names.outputs.service_name }} \
+            --image ${{ steps.names.outputs.image }}:preview-${{ github.sha }} \
+            --region ${{ steps.names.outputs.region }} \
+            --platform managed \
+            --port 8501 \
+            --cpu 1 \
+            --memory 1Gi \
+            --min-instances $MIN \
+            --max-instances 2 \
+            --concurrency 40 \
+            --allow-unauthenticated \
+            --revision-suffix=preview-${{ github.run_number }}
+
+          URL=$(gcloud run services describe ${{ steps.names.outputs.service_name }} --region ${{ steps.names.outputs.region }} --format='value(status.url)')
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "✅ Preview URL: $URL"
+
+      - name: Summary
+        run: |
+          echo "### ✅ Preview déployée" >> $GITHUB_STEP_SUMMARY
+          echo "- Service: \`${{ steps.names.outputs.service_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Région: \`${{ steps.names.outputs.region }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- URL: ${{ steps.deploy.outputs.url }}" >> $GITHUB_STEP_SUMMARY
