@@ -1,0 +1,17 @@
+[project]
+name = "ai-agent-review"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "google-generativeai==0.7.2",
+    "langchain==0.2.14",
+    "langchain-community==0.2.12",
+    "langchain-core==0.2.38",
+    "openai==1.43.0",
+    "pydantic==2.8.2",
+    "python-dotenv==1.0.1",
+    "streamlit==1.38.0",
+    "uv>=0.8.22",
+]
